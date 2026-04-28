@@ -428,6 +428,10 @@ func (a *App) createUserOrGuest(rctx request.CTX, user *model.User, guest bool) 
 }
 
 func (a *App) CreateOAuthUser(rctx request.CTX, service string, userData io.Reader, inviteToken string, inviteId string, tokenUser *model.User) (*model.User, *model.AppError) {
+	return a.createOAuthUserWithProps(rctx, service, userData, inviteToken, inviteId, tokenUser, nil)
+}
+
+func (a *App) createOAuthUserWithProps(rctx request.CTX, service string, userData io.Reader, inviteToken string, inviteId string, tokenUser *model.User, props map[string]string) (*model.User, *model.AppError) {
 	if !*a.Config().TeamSettings.EnableUserCreation {
 		return nil, model.NewAppError("CreateOAuthUser", "api.user.create_user.disabled.app_error", nil, "", http.StatusNotImplemented)
 	}
@@ -437,7 +441,7 @@ func (a *App) CreateOAuthUser(rctx request.CTX, service string, userData io.Read
 		return nil, e
 	}
 
-	settings, err := provider.GetSSOSettings(rctx, a.Config(), service)
+	settings, err := a.getSSOSettingsForOAuthProps(service, props)
 	if err != nil {
 		return nil, model.NewAppError("CreateOAuthUser", "api.user.oauth.get_settings.app_error", map[string]any{"Service": service}, "", http.StatusInternalServerError).Wrap(err)
 	}

@@ -106,6 +106,7 @@ export type ClientConfig = {
     EnableSignUpWithGoogle: string;
     EnableSignUpWithOffice365: string;
     EnableSignUpWithOpenId: string;
+    EnableSignUpWithOpenFederatedAuth: string;
     EnableSVGs: string;
     EnableTesting: string;
     EnableThemeSelection: string;
@@ -164,6 +165,9 @@ export type ClientConfig = {
     GitLabButtonColor: string;
     OpenIdButtonText: string;
     OpenIdButtonColor: string;
+    OpenFederatedAuthButtonText: string;
+    OpenFederatedAuthButtonColor: string;
+    OpenFederatedAuthProviders: string;
     PasswordEnableForgotLink: string;
     PasswordMinimumLength: string;
     PasswordRequireLowercase: string;

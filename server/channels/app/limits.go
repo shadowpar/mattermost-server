@@ -10,8 +10,8 @@ import (
 )
 
 const (
-	maxUsersLimit     = 200
-	maxUsersHardLimit = 250
+	maxUsersLimit     = 0
+	maxUsersHardLimit = 0
 )
 
 func (a *App) GetServerLimits() (*model.ServerLimits, *model.AppError) {
@@ -19,7 +19,8 @@ func (a *App) GetServerLimits() (*model.ServerLimits, *model.AppError) {
 	license := a.License()
 
 	if license == nil && maxUsersLimit > 0 {
-		// Enforce hard-coded limits for unlicensed servers (no grace period).
+		// Keep this branch dormant for unlicensed community builds. A zero hard limit
+		// is treated as unlimited by isAtUserLimit.
 		limits.MaxUsersLimit = maxUsersLimit
 		limits.MaxUsersHardLimit = maxUsersHardLimit
 	} else if license != nil && license.IsSeatCountEnforced && license.Features != nil && license.Features.Users != nil {

@@ -4,6 +4,7 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -360,6 +361,10 @@ func GenerateLimitedClientConfig(c *model.Config, telemetryID string, license *m
 	props["EnableSignUpWithGoogle"] = "false"
 	props["EnableSignUpWithOffice365"] = "false"
 	props["EnableSignUpWithOpenId"] = "false"
+	props["EnableSignUpWithOpenFederatedAuth"] = strconv.FormatBool(*c.OpenFederatedAuthSettings.Enable)
+	props["OpenFederatedAuthButtonColor"] = *c.OpenFederatedAuthSettings.ButtonColor
+	props["OpenFederatedAuthButtonText"] = *c.OpenFederatedAuthSettings.ButtonText
+	props["OpenFederatedAuthProviders"] = openFederatedAuthProvidersForClient(c)
 	props["OpenIdButtonText"] = ""
 	props["OpenIdButtonColor"] = ""
 	props["CWSURL"] = ""
@@ -451,6 +456,50 @@ func GenerateLimitedClientConfig(c *model.Config, telemetryID string, license *m
 	}
 
 	return props
+}
+
+func openFederatedAuthProvidersForClient(c *model.Config) string {
+	type providerConfig struct {
+		ProviderID  string `json:"provider_id"`
+		DisplayName string `json:"display_name"`
+		ButtonColor string `json:"button_color"`
+	}
+
+	providers := []providerConfig{}
+	for _, provider := range c.OpenFederatedAuthSettings.Providers {
+		if provider == nil || provider.ProviderID == nil || strings.TrimSpace(*provider.ProviderID) == "" {
+			continue
+		}
+		if provider.Enable != nil && !*provider.Enable {
+			continue
+		}
+
+		displayName := ""
+		if provider.DisplayName != nil {
+			displayName = *provider.DisplayName
+		}
+		if displayName == "" && provider.ButtonText != nil {
+			displayName = *provider.ButtonText
+		}
+
+		buttonColor := ""
+		if provider.ButtonColor != nil {
+			buttonColor = *provider.ButtonColor
+		}
+
+		providers = append(providers, providerConfig{
+			ProviderID:  strings.TrimSpace(*provider.ProviderID),
+			DisplayName: displayName,
+			ButtonColor: buttonColor,
+		})
+	}
+
+	data, err := json.Marshal(providers)
+	if err != nil {
+		return "[]"
+	}
+
+	return string(data)
 }
 
 func getGiphySdkKey(ss model.ServiceSettings) string {

@@ -86,6 +86,7 @@ const Signup = ({onCustomizeHeader}: SignupProps) => {
         EnableSignUpWithGoogle,
         EnableSignUpWithOffice365,
         EnableSignUpWithOpenId,
+        EnableSignUpWithOpenFederatedAuth,
         EnableLdap,
         EnableSaml,
         SamlLoginButtonText,
@@ -96,6 +97,9 @@ const Signup = ({onCustomizeHeader}: SignupProps) => {
         GitLabButtonColor,
         OpenIdButtonText,
         OpenIdButtonColor,
+        OpenFederatedAuthButtonText,
+        OpenFederatedAuthButtonColor,
+        OpenFederatedAuthProviders,
         EnableCustomBrand,
         CustomBrandText,
         TermsOfServiceLink,
@@ -119,6 +123,7 @@ const Signup = ({onCustomizeHeader}: SignupProps) => {
     const enableSignUpWithGoogle = enableUserCreation && EnableSignUpWithGoogle === 'true';
     const enableSignUpWithOffice365 = enableUserCreation && EnableSignUpWithOffice365 === 'true';
     const enableSignUpWithOpenId = enableUserCreation && EnableSignUpWithOpenId === 'true';
+    const enableSignUpWithOpenFederatedAuth = enableUserCreation && EnableSignUpWithOpenFederatedAuth === 'true';
     const enableLDAP = EnableLdap === 'true';
     const enableSAML = EnableSaml === 'true';
     const enableCustomBrand = EnableCustomBrand === 'true';
@@ -141,7 +146,7 @@ const Signup = ({onCustomizeHeader}: SignupProps) => {
     const [acceptedTerms, setAcceptedTerms] = useState(false);
     const [submitClicked, setSubmitClicked] = useState(false);
 
-    const enableExternalSignup = enableSignUpWithGitLab || enableSignUpWithOffice365 || enableSignUpWithGoogle || enableSignUpWithOpenId || enableLDAP || enableSAML;
+    const enableExternalSignup = enableSignUpWithGitLab || enableSignUpWithOffice365 || enableSignUpWithGoogle || enableSignUpWithOpenId || enableSignUpWithOpenFederatedAuth || enableLDAP || enableSAML;
     const hasError = Boolean(emailError || nameError || passwordError || serverError || alertBanner);
     const canSubmit = Boolean(email && name && password && acceptedTerms) && !hasError && !loading;
     const passwordConfig = useSelector(getPasswordConfig);
@@ -200,6 +205,34 @@ const Signup = ({onCustomizeHeader}: SignupProps) => {
                 style: {color: OpenIdButtonColor, borderColor: OpenIdButtonColor},
                 onClick: desktopExternalAuth(url),
             });
+        }
+
+        if (enableSignUpWithOpenFederatedAuth) {
+            const configuredProviders = parseOpenFederatedAuthProviders(OpenFederatedAuthProviders);
+            const providers = configuredProviders.length > 0 ? configuredProviders : [{
+                provider_id: '',
+                display_name: OpenFederatedAuthButtonText,
+                button_color: OpenFederatedAuthButtonColor,
+            }];
+
+            for (const provider of providers) {
+                const providerSearch = new URLSearchParams(search);
+                if (provider.provider_id) {
+                    providerSearch.set('provider', provider.provider_id);
+                }
+                const queryString = providerSearch.toString();
+                const url = `${Client4.getOAuthRoute()}/openfederatedauth/signup${queryString ? `?${queryString}` : ''}`;
+                const id = provider.provider_id ? `openfederatedauth-${provider.provider_id}` : 'openfederatedauth';
+                const buttonColor = provider.button_color || OpenFederatedAuthButtonColor;
+                externalLoginOptions.push({
+                    id,
+                    url,
+                    icon: <LoginOpenIDIcon/>,
+                    label: provider.display_name || OpenFederatedAuthButtonText || formatMessage({id: 'login.open_federated_auth', defaultMessage: 'Open Federated Auth'}),
+                    style: {color: buttonColor, borderColor: buttonColor},
+                    onClick: desktopExternalAuth(url),
+                });
+            }
         }
 
         if (isLicensed && enableLDAP) {
@@ -822,5 +855,28 @@ const Signup = ({onCustomizeHeader}: SignupProps) => {
         </div>
     );
 };
+
+type OpenFederatedAuthProviderConfig = {
+    provider_id: string;
+    display_name: string;
+    button_color: string;
+}
+
+function parseOpenFederatedAuthProviders(rawProviders?: string): OpenFederatedAuthProviderConfig[] {
+    if (!rawProviders) {
+        return [];
+    }
+
+    try {
+        const parsed = JSON.parse(rawProviders);
+        if (!Array.isArray(parsed)) {
+            return [];
+        }
+
+        return parsed.filter((provider) => provider && typeof provider.provider_id === 'string');
+    } catch {
+        return [];
+    }
+}
 
 export default Signup;

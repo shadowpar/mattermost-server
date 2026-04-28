@@ -50,9 +50,10 @@ const (
 
 	ServiceGitlab = "gitlab"
 
-	ServiceGoogle    = "google"
-	ServiceOffice365 = "office365"
-	ServiceOpenid    = "openid"
+	ServiceGoogle            = "google"
+	ServiceOffice365         = "office365"
+	ServiceOpenid            = "openid"
+	ServiceOpenFederatedAuth = "openfederatedauth"
 
 	GenericNoChannelNotification = "generic_no_channel"
 	GenericNotification          = "generic"
@@ -1280,17 +1281,102 @@ func (s *AnalyticsSettings) SetDefaults() {
 }
 
 type SSOSettings struct {
-	Enable               *bool   `access:"authentication_openid"`
-	Secret               *string `access:"authentication_openid"` // telemetry: none
-	Id                   *string `access:"authentication_openid"` // telemetry: none
-	Scope                *string `access:"authentication_openid"` // telemetry: none
-	AuthEndpoint         *string `access:"authentication_openid"` // telemetry: none
-	TokenEndpoint        *string `access:"authentication_openid"` // telemetry: none
-	UserAPIEndpoint      *string `access:"authentication_openid"` // telemetry: none
-	DiscoveryEndpoint    *string `access:"authentication_openid"` // telemetry: none
-	ButtonText           *string `access:"authentication_openid"` // telemetry: none
-	ButtonColor          *string `access:"authentication_openid"` // telemetry: none
-	UsePreferredUsername *bool   `access:"authentication_openid"` // telemetry: none
+	Enable                      *bool   `access:"authentication_openid"`
+	Secret                      *string `access:"authentication_openid"` // telemetry: none
+	Id                          *string `access:"authentication_openid"` // telemetry: none
+	Scope                       *string `access:"authentication_openid"` // telemetry: none
+	AuthEndpoint                *string `access:"authentication_openid"` // telemetry: none
+	TokenEndpoint               *string `access:"authentication_openid"` // telemetry: none
+	UserAPIEndpoint             *string `access:"authentication_openid"` // telemetry: none
+	DiscoveryEndpoint           *string `access:"authentication_openid"` // telemetry: none
+	Issuer                      *string `access:"authentication_openid"` // telemetry: none
+	JWKSURI                     *string `access:"authentication_openid"` // telemetry: none
+	ButtonText                  *string `access:"authentication_openid"` // telemetry: none
+	ButtonColor                 *string `access:"authentication_openid"` // telemetry: none
+	UsePreferredUsername        *bool   `access:"authentication_openid"` // telemetry: none
+	EmailClaimName              *string `access:"authentication_openid"` // telemetry: none
+	MattermostIDClaimName       *string `access:"authentication_openid"` // telemetry: none
+	OpenFederatedAuthProviderID *string `access:"authentication_openid"` // telemetry: none
+	UseProviderIDInAuthData     *bool   `access:"authentication_openid"` // telemetry: none
+}
+
+type OpenFederatedAuthSettings struct {
+	SSOSettings
+	Providers []*OpenFederatedAuthProviderSettings `access:"authentication_openid"` // telemetry: none
+}
+
+type OpenFederatedAuthProviderSettings struct {
+	ProviderID  *string `access:"authentication_openid"` // telemetry: none
+	DisplayName *string `access:"authentication_openid"` // telemetry: none
+	SSOSettings
+}
+
+func (s *OpenFederatedAuthSettings) setDefaults() {
+	s.SSOSettings.setDefaults("openid profile email", "", "", "", "#145DBF")
+	setOpenFederatedAuthClaimDefaults(&s.SSOSettings)
+
+	if s.Providers == nil {
+		s.Providers = []*OpenFederatedAuthProviderSettings{}
+	}
+	for _, provider := range s.Providers {
+		provider.setDefaults()
+	}
+}
+
+func (s *OpenFederatedAuthProviderSettings) setDefaults() {
+	if s.ProviderID == nil {
+		s.ProviderID = NewPointer("")
+	}
+
+	if s.DisplayName == nil {
+		s.DisplayName = NewPointer("")
+	}
+
+	s.SSOSettings.setDefaults("openid profile email", "", "", "", "#145DBF")
+	s.SSOSettings.OpenFederatedAuthProviderID = s.ProviderID
+	setOpenFederatedAuthClaimDefaults(&s.SSOSettings)
+}
+
+func (s *OpenFederatedAuthSettings) ProviderSettings(providerID string) *SSOSettings {
+	if providerID == "" {
+		return &s.SSOSettings
+	}
+
+	for _, provider := range s.Providers {
+		if provider != nil && provider.ProviderID != nil && *provider.ProviderID == providerID {
+			return &provider.SSOSettings
+		}
+	}
+
+	return nil
+}
+
+func (s *OpenFederatedAuthSettings) ProviderDisplayName(providerID string) string {
+	for _, provider := range s.Providers {
+		if provider != nil && provider.ProviderID != nil && *provider.ProviderID == providerID && provider.DisplayName != nil {
+			return *provider.DisplayName
+		}
+	}
+
+	return ""
+}
+
+func setOpenFederatedAuthClaimDefaults(s *SSOSettings) {
+	if s.EmailClaimName == nil || strings.TrimSpace(*s.EmailClaimName) == "" {
+		s.EmailClaimName = NewPointer("email")
+	}
+
+	if s.MattermostIDClaimName == nil {
+		s.MattermostIDClaimName = NewPointer("")
+	}
+
+	if s.OpenFederatedAuthProviderID == nil {
+		s.OpenFederatedAuthProviderID = NewPointer("")
+	}
+
+	if s.UseProviderIDInAuthData == nil {
+		s.UseProviderIDInAuthData = NewPointer(false)
+	}
 }
 
 func (s *SSOSettings) setDefaults(scope, authEndpoint, tokenEndpoint, userAPIEndpoint, buttonColor string) {
@@ -1312,6 +1398,14 @@ func (s *SSOSettings) setDefaults(scope, authEndpoint, tokenEndpoint, userAPIEnd
 
 	if s.DiscoveryEndpoint == nil {
 		s.DiscoveryEndpoint = NewPointer("")
+	}
+
+	if s.Issuer == nil {
+		s.Issuer = NewPointer("")
+	}
+
+	if s.JWKSURI == nil {
+		s.JWKSURI = NewPointer("")
 	}
 
 	if s.AuthEndpoint == nil {
@@ -1337,6 +1431,14 @@ func (s *SSOSettings) setDefaults(scope, authEndpoint, tokenEndpoint, userAPIEnd
 	// Note: Preferred username is not supported for Google.
 	if s.UsePreferredUsername == nil {
 		s.UsePreferredUsername = NewPointer(false)
+	}
+
+	if s.EmailClaimName == nil {
+		s.EmailClaimName = NewPointer("")
+	}
+
+	if s.MattermostIDClaimName == nil {
+		s.MattermostIDClaimName = NewPointer("")
 	}
 }
 
@@ -3958,6 +4060,7 @@ type Config struct {
 	AnnouncementSettings        AnnouncementSettings
 	ThemeSettings               ThemeSettings
 	GitLabSettings              SSOSettings
+	OpenFederatedAuthSettings   OpenFederatedAuthSettings
 	GoogleSettings              SSOSettings
 	Office365Settings           Office365Settings
 	OpenIdSettings              SSOSettings
@@ -4025,6 +4128,8 @@ func (o *Config) GetSSOService(service string) *SSOSettings {
 	switch service {
 	case ServiceGitlab:
 		return &o.GitLabSettings
+	case ServiceOpenFederatedAuth:
+		return &o.OpenFederatedAuthSettings.SSOSettings
 	case ServiceGoogle:
 		return &o.GoogleSettings
 	case ServiceOffice365:
@@ -4068,6 +4173,7 @@ func (o *Config) SetDefaults() {
 	o.Office365Settings.setDefaults()
 	o.Office365Settings.setDefaults()
 	o.GitLabSettings.setDefaults("", "", "", "", "")
+	o.OpenFederatedAuthSettings.setDefaults()
 	o.GoogleSettings.setDefaults(GoogleSettingsDefaultScope, GoogleSettingsDefaultAuthEndpoint, GoogleSettingsDefaultTokenEndpoint, GoogleSettingsDefaultUserAPIEndpoint, "")
 	o.OpenIdSettings.setDefaults(OpenidSettingsDefaultScope, "", "", "", "#145DBF")
 	o.ServiceSettings.SetDefaults(isUpdate)
@@ -5021,6 +5127,10 @@ func (o *Config) Sanitize(pluginManifests []*Manifest, opts *SanitizeOptions) {
 
 	if o.GitLabSettings.Secret != nil && *o.GitLabSettings.Secret != "" {
 		*o.GitLabSettings.Secret = FakeSetting
+	}
+
+	if o.OpenFederatedAuthSettings.Secret != nil && *o.OpenFederatedAuthSettings.Secret != "" {
+		*o.OpenFederatedAuthSettings.Secret = FakeSetting
 	}
 
 	if o.GoogleSettings.Secret != nil && *o.GoogleSettings.Secret != "" {

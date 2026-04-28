@@ -6,16 +6,21 @@ package app
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rsa"
 	b64 "encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/big"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/pkg/errors"
 
 	"github.com/mattermost/mattermost/server/public/model"
@@ -33,6 +38,30 @@ const (
 	CookieOAuth              = "MMOAUTH"
 	OpenIDScope              = "openid"
 )
+
+type openFederatedAuthDiscoveryMetadata struct {
+	AuthorizationEndpoint string `json:"authorization_endpoint"`
+	TokenEndpoint         string `json:"token_endpoint"`
+	UserInfoEndpoint      string `json:"userinfo_endpoint"`
+	JWKSURI               string `json:"jwks_uri"`
+	Issuer                string `json:"issuer"`
+}
+
+type openFederatedAuthJWKSet struct {
+	Keys []openFederatedAuthJWK `json:"keys"`
+}
+
+type openFederatedAuthJWK struct {
+	KeyID     string `json:"kid"`
+	KeyType   string `json:"kty"`
+	Algorithm string `json:"alg"`
+	Use       string `json:"use"`
+	N         string `json:"n"`
+	E         string `json:"e"`
+	Crv       string `json:"crv"`
+	X         string `json:"x"`
+	Y         string `json:"y"`
+}
 
 func (a *App) CreateOAuthApp(app *model.OAuthApp) (*model.OAuthApp, *model.AppError) {
 	// Public method for plugin API - always generates secrets for backward compatibility
@@ -584,6 +613,11 @@ func (a *App) GetOAuthLoginEndpoint(rctx request.CTX, w http.ResponseWriter, r *
 		stateProps["redirect_to"] = redirectTo
 	}
 
+	if service == model.ServiceOpenFederatedAuth {
+		stateProps["provider"] = r.URL.Query().Get("provider")
+		stateProps["nonce"] = model.NewId()
+	}
+
 	if desktopToken != "" {
 		stateProps["desktop_token"] = desktopToken
 	}
@@ -610,6 +644,11 @@ func (a *App) GetOAuthSignupEndpoint(rctx request.CTX, w http.ResponseWriter, r 
 
 	if desktopToken != "" {
 		stateProps["desktop_token"] = desktopToken
+	}
+
+	if service == model.ServiceOpenFederatedAuth {
+		stateProps["provider"] = r.URL.Query().Get("provider")
+		stateProps["nonce"] = model.NewId()
 	}
 
 	authURL, err := a.GetAuthorizationCode(rctx, w, r, service, stateProps, "")
@@ -719,15 +758,15 @@ func (a *App) CompleteOAuth(rctx request.CTX, service string, body io.ReadCloser
 
 	switch action {
 	case model.OAuthActionSignup:
-		return a.CreateOAuthUser(rctx, service, body, inviteToken, inviteId, tokenUser)
+		return a.createOAuthUserWithProps(rctx, service, body, inviteToken, inviteId, tokenUser, props)
 	case model.OAuthActionLogin:
-		return a.LoginByOAuth(rctx, service, body, inviteToken, inviteId, tokenUser)
+		return a.loginByOAuthWithProps(rctx, service, body, inviteToken, inviteId, tokenUser, props)
 	case model.OAuthActionEmailToSSO:
 		return a.CompleteSwitchWithOAuth(rctx, service, body, props["email"], tokenUser)
 	case model.OAuthActionSSOToEmail:
-		return a.LoginByOAuth(rctx, service, body, inviteToken, inviteId, tokenUser)
+		return a.loginByOAuthWithProps(rctx, service, body, inviteToken, inviteId, tokenUser, props)
 	default:
-		return a.LoginByOAuth(rctx, service, body, inviteToken, inviteId, tokenUser)
+		return a.loginByOAuthWithProps(rctx, service, body, inviteToken, inviteId, tokenUser, props)
 	}
 }
 
@@ -737,7 +776,7 @@ func (a *App) getSSOProvider(service string) (einterfaces.OAuthProvider, *model.
 		return nil, model.NewAppError("getSSOProvider", "api.user.authorize_oauth_user.unsupported.app_error", nil, "service="+service, http.StatusNotImplemented)
 	}
 	providerType := service
-	if strings.Contains(*sso.Scope, OpenIDScope) {
+	if service != model.ServiceOpenFederatedAuth && strings.Contains(*sso.Scope, OpenIDScope) {
 		providerType = model.ServiceOpenid
 	}
 	provider := einterfaces.GetOAuthProvider(providerType)
@@ -748,8 +787,303 @@ func (a *App) getSSOProvider(service string) (einterfaces.OAuthProvider, *model.
 	return provider, nil
 }
 
+func (a *App) getSSOSettingsForOAuthProps(service string, props map[string]string) (*model.SSOSettings, error) {
+	if service != model.ServiceOpenFederatedAuth {
+		return a.Config().GetSSOService(service), nil
+	}
+
+	providerID := ""
+	if props != nil {
+		providerID = strings.TrimSpace(props["provider"])
+	}
+	if providerID == "" && len(a.Config().OpenFederatedAuthSettings.Providers) > 0 {
+		return nil, fmt.Errorf("open federated auth provider is required")
+	}
+
+	settings := a.Config().OpenFederatedAuthSettings.ProviderSettings(providerID)
+	if settings == nil {
+		return nil, fmt.Errorf("open federated auth provider %q is not configured", providerID)
+	}
+	if settings.Enable != nil && !*settings.Enable {
+		return nil, fmt.Errorf("open federated auth provider %q is disabled", providerID)
+	}
+
+	return settings, nil
+}
+
+func (a *App) getResolvedSSOSettingsForOAuthProps(rctx request.CTX, service string, props map[string]string) (*model.SSOSettings, error) {
+	settings, err := a.getSSOSettingsForOAuthProps(service, props)
+	if err != nil || service != model.ServiceOpenFederatedAuth {
+		return settings, err
+	}
+
+	return a.resolveOpenFederatedAuthEndpoints(rctx, settings)
+}
+
+func (a *App) resolveOpenFederatedAuthEndpoints(rctx request.CTX, settings *model.SSOSettings) (*model.SSOSettings, error) {
+	if settings == nil {
+		return nil, fmt.Errorf("open federated auth settings are nil")
+	}
+
+	resolved := *settings
+
+	needsDiscovery := normalizeOpenFederatedAuthDiscoveryEndpoint(pointerValue(resolved.DiscoveryEndpoint)) != "" && (strings.TrimSpace(pointerValue(resolved.AuthEndpoint)) == "" ||
+		strings.TrimSpace(pointerValue(resolved.TokenEndpoint)) == "" ||
+		strings.TrimSpace(pointerValue(resolved.UserAPIEndpoint)) == "" ||
+		strings.TrimSpace(pointerValue(resolved.Issuer)) == "" ||
+		strings.TrimSpace(pointerValue(resolved.JWKSURI)) == "")
+
+	if !needsDiscovery &&
+		strings.TrimSpace(pointerValue(resolved.AuthEndpoint)) != "" &&
+		strings.TrimSpace(pointerValue(resolved.TokenEndpoint)) != "" &&
+		strings.TrimSpace(pointerValue(resolved.UserAPIEndpoint)) != "" {
+		return &resolved, nil
+	}
+
+	discoveryEndpoint := normalizeOpenFederatedAuthDiscoveryEndpoint(pointerValue(resolved.DiscoveryEndpoint))
+	if discoveryEndpoint == "" {
+		return nil, fmt.Errorf("open federated auth requires AuthEndpoint, TokenEndpoint, and UserAPIEndpoint, or a DiscoveryEndpoint")
+	}
+
+	req, err := http.NewRequest("GET", discoveryEndpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := a.HTTPService().MakeClient(true).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var metadata openFederatedAuthDiscoveryMetadata
+	if err = json.NewDecoder(resp.Body).Decode(&metadata); err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("open federated auth discovery endpoint returned status %d", resp.StatusCode)
+	}
+
+	if strings.TrimSpace(pointerValue(resolved.AuthEndpoint)) == "" && strings.TrimSpace(metadata.AuthorizationEndpoint) != "" {
+		resolved.AuthEndpoint = model.NewPointer(strings.TrimSpace(metadata.AuthorizationEndpoint))
+	}
+	if strings.TrimSpace(pointerValue(resolved.TokenEndpoint)) == "" && strings.TrimSpace(metadata.TokenEndpoint) != "" {
+		resolved.TokenEndpoint = model.NewPointer(strings.TrimSpace(metadata.TokenEndpoint))
+	}
+	if strings.TrimSpace(pointerValue(resolved.UserAPIEndpoint)) == "" && strings.TrimSpace(metadata.UserInfoEndpoint) != "" {
+		resolved.UserAPIEndpoint = model.NewPointer(strings.TrimSpace(metadata.UserInfoEndpoint))
+	}
+	if strings.TrimSpace(pointerValue(resolved.Issuer)) == "" && strings.TrimSpace(metadata.Issuer) != "" {
+		resolved.Issuer = model.NewPointer(strings.TrimSpace(metadata.Issuer))
+	}
+	if strings.TrimSpace(pointerValue(resolved.JWKSURI)) == "" && strings.TrimSpace(metadata.JWKSURI) != "" {
+		resolved.JWKSURI = model.NewPointer(strings.TrimSpace(metadata.JWKSURI))
+	}
+
+	if strings.TrimSpace(pointerValue(resolved.AuthEndpoint)) == "" {
+		return nil, fmt.Errorf("open federated auth discovery response is missing authorization_endpoint")
+	}
+	if strings.TrimSpace(pointerValue(resolved.TokenEndpoint)) == "" {
+		return nil, fmt.Errorf("open federated auth discovery response is missing token_endpoint")
+	}
+	if strings.TrimSpace(pointerValue(resolved.UserAPIEndpoint)) == "" {
+		return nil, fmt.Errorf("open federated auth discovery response is missing userinfo_endpoint")
+	}
+
+	if rctx.Logger() != nil {
+		rctx.Logger().Debug("Resolved OpenFederatedAuth endpoints from discovery", mlog.String("discovery_endpoint", discoveryEndpoint))
+	}
+
+	return &resolved, nil
+}
+
+func normalizeOpenFederatedAuthDiscoveryEndpoint(endpoint string) string {
+	endpoint = strings.TrimSpace(endpoint)
+	if endpoint == "" {
+		return ""
+	}
+	if strings.Contains(endpoint, "/.well-known/") {
+		return endpoint
+	}
+
+	return strings.TrimRight(endpoint, "/") + "/.well-known/openid-configuration"
+}
+
+func pointerValue(value *string) string {
+	if value == nil {
+		return ""
+	}
+
+	return *value
+}
+
+func (a *App) validateOpenFederatedAuthIDToken(settings *model.SSOSettings, idToken, nonce string) ([]byte, error) {
+	if strings.TrimSpace(idToken) == "" {
+		return nil, fmt.Errorf("id_token is empty")
+	}
+	issuer := strings.TrimSpace(pointerValue(settings.Issuer))
+	if issuer == "" {
+		return nil, fmt.Errorf("open federated auth issuer is required to validate id_token")
+	}
+	clientID := strings.TrimSpace(pointerValue(settings.Id))
+	if clientID == "" {
+		return nil, fmt.Errorf("open federated auth client id is required to validate id_token")
+	}
+	jwksURI := strings.TrimSpace(pointerValue(settings.JWKSURI))
+	if jwksURI == "" {
+		return nil, fmt.Errorf("open federated auth JWKSURI is required to validate id_token")
+	}
+
+	keySet, err := a.fetchOpenFederatedAuthJWKSet(jwksURI)
+	if err != nil {
+		return nil, err
+	}
+
+	claims := jwt.MapClaims{}
+	parser := jwt.NewParser(
+		jwt.WithAudience(clientID),
+		jwt.WithExpirationRequired(),
+		jwt.WithIssuer(issuer),
+		jwt.WithIssuedAt(),
+		jwt.WithValidMethods([]string{
+			jwt.SigningMethodRS256.Alg(),
+			jwt.SigningMethodRS384.Alg(),
+			jwt.SigningMethodRS512.Alg(),
+			jwt.SigningMethodPS256.Alg(),
+			jwt.SigningMethodPS384.Alg(),
+			jwt.SigningMethodPS512.Alg(),
+			jwt.SigningMethodES256.Alg(),
+			jwt.SigningMethodES384.Alg(),
+			jwt.SigningMethodES512.Alg(),
+		}),
+	)
+
+	token, err := parser.ParseWithClaims(idToken, claims, func(token *jwt.Token) (any, error) {
+		kid, _ := token.Header["kid"].(string)
+		alg, _ := token.Header["alg"].(string)
+		return keySet.key(kid, alg)
+	})
+	if err != nil {
+		return nil, err
+	}
+	if !token.Valid {
+		return nil, fmt.Errorf("id_token is invalid")
+	}
+
+	if nonce != "" {
+		tokenNonce, _ := claims["nonce"].(string)
+		if tokenNonce != nonce {
+			return nil, fmt.Errorf("id_token nonce mismatch")
+		}
+	}
+
+	return json.Marshal(claims)
+}
+
+func (a *App) fetchOpenFederatedAuthJWKSet(jwksURI string) (*openFederatedAuthJWKSet, error) {
+	req, err := http.NewRequest("GET", jwksURI, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := a.HTTPService().MakeClient(true).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var keySet openFederatedAuthJWKSet
+	if err = json.NewDecoder(resp.Body).Decode(&keySet); err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("open federated auth JWKS endpoint returned status %d", resp.StatusCode)
+	}
+
+	return &keySet, nil
+}
+
+func (s *openFederatedAuthJWKSet) key(kid, alg string) (any, error) {
+	for _, key := range s.Keys {
+		if key.KeyID != "" && kid != "" && key.KeyID != kid {
+			continue
+		}
+		if key.Algorithm != "" && alg != "" && key.Algorithm != alg {
+			continue
+		}
+		if key.Use != "" && key.Use != "sig" {
+			continue
+		}
+
+		switch key.KeyType {
+		case "RSA":
+			return rsaPublicKeyFromJWK(key)
+		case "EC":
+			return ecdsaPublicKeyFromJWK(key)
+		}
+	}
+
+	return nil, fmt.Errorf("matching JWKS key not found")
+}
+
+func rsaPublicKeyFromJWK(key openFederatedAuthJWK) (*rsa.PublicKey, error) {
+	nBytes, err := b64.RawURLEncoding.DecodeString(key.N)
+	if err != nil {
+		return nil, err
+	}
+	eBytes, err := b64.RawURLEncoding.DecodeString(key.E)
+	if err != nil {
+		return nil, err
+	}
+
+	e := big.NewInt(0).SetBytes(eBytes).Int64()
+	if e == 0 {
+		return nil, fmt.Errorf("RSA JWK exponent is empty")
+	}
+
+	return &rsa.PublicKey{
+		N: big.NewInt(0).SetBytes(nBytes),
+		E: int(e),
+	}, nil
+}
+
+func ecdsaPublicKeyFromJWK(key openFederatedAuthJWK) (*ecdsa.PublicKey, error) {
+	xBytes, err := b64.RawURLEncoding.DecodeString(key.X)
+	if err != nil {
+		return nil, err
+	}
+	yBytes, err := b64.RawURLEncoding.DecodeString(key.Y)
+	if err != nil {
+		return nil, err
+	}
+
+	var curve elliptic.Curve
+	switch key.Crv {
+	case "P-256":
+		curve = elliptic.P256()
+	case "P-384":
+		curve = elliptic.P384()
+	case "P-521":
+		curve = elliptic.P521()
+	default:
+		return nil, fmt.Errorf("unsupported EC JWK curve %q", key.Crv)
+	}
+
+	return &ecdsa.PublicKey{
+		Curve: curve,
+		X:     big.NewInt(0).SetBytes(xBytes),
+		Y:     big.NewInt(0).SetBytes(yBytes),
+	}, nil
+}
+
 // TODO: merge conflict, needs teamID string
 func (a *App) LoginByOAuth(rctx request.CTX, service string, userData io.Reader, inviteToken string, inviteId string, tokenUser *model.User) (*model.User, *model.AppError) {
+	return a.loginByOAuthWithProps(rctx, service, userData, inviteToken, inviteId, tokenUser, nil)
+}
+
+func (a *App) loginByOAuthWithProps(rctx request.CTX, service string, userData io.Reader, inviteToken string, inviteId string, tokenUser *model.User, props map[string]string) (*model.User, *model.AppError) {
 	provider, e := a.getSSOProvider(service)
 	if e != nil {
 		return nil, e
@@ -761,7 +1095,7 @@ func (a *App) LoginByOAuth(rctx request.CTX, service string, userData io.Reader,
 			map[string]any{"Service": service}, "", http.StatusBadRequest)
 	}
 
-	settings, err := provider.GetSSOSettings(rctx, a.Config(), service)
+	settings, err := a.getSSOSettingsForOAuthProps(service, props)
 	if err != nil {
 		return nil, model.NewAppError("LoginByOAuth", "api.user.oauth.get_settings.app_error",
 			map[string]any{"Service": service}, "", http.StatusBadRequest).Wrap(err)
@@ -781,7 +1115,7 @@ func (a *App) LoginByOAuth(rctx request.CTX, service string, userData io.Reader,
 	user, appErr := a.GetUserByAuth(model.NewPointer(*authUser.AuthData), service)
 	if appErr != nil {
 		if appErr.Id == MissingAuthAccountError {
-			user, appErr = a.CreateOAuthUser(rctx, service, bytes.NewReader(buf.Bytes()), inviteToken, inviteId, tokenUser)
+			user, appErr = a.createOAuthUserWithProps(rctx, service, bytes.NewReader(buf.Bytes()), inviteToken, inviteId, tokenUser, props)
 		} else {
 			return nil, appErr
 		}
@@ -950,12 +1284,12 @@ func (a *App) GetOAuthStateToken(token string) (*model.Token, *model.AppError) {
 }
 
 func (a *App) GetAuthorizationCode(rctx request.CTX, w http.ResponseWriter, r *http.Request, service string, props map[string]string, loginHint string) (string, *model.AppError) {
-	provider, e := a.getSSOProvider(service)
+	_, e := a.getSSOProvider(service)
 	if e != nil {
 		return "", e
 	}
 
-	sso, e2 := provider.GetSSOSettings(rctx, a.Config(), service)
+	sso, e2 := a.getResolvedSSOSettingsForOAuthProps(rctx, service, props)
 	if e2 != nil {
 		return "", model.NewAppError("GetAuthorizationCode.GetSSOSettings", "api.user.get_authorization_code.endpoint.app_error", nil, "", http.StatusNotImplemented).Wrap(e2)
 	}
@@ -1010,6 +1344,9 @@ func (a *App) GetAuthorizationCode(rctx request.CTX, w http.ResponseWriter, r *h
 	if loginHint != "" {
 		authURL += "&login_hint=" + utils.URLEncode(loginHint)
 	}
+	if service == model.ServiceOpenFederatedAuth && props["nonce"] != "" {
+		authURL += "&nonce=" + utils.URLEncode(props["nonce"])
+	}
 
 	return authURL, nil
 }
@@ -1020,11 +1357,6 @@ func (a *App) AuthorizeOAuthUser(rctx request.CTX, w http.ResponseWriter, r *htt
 		return nil, nil, nil, e
 	}
 
-	sso, e2 := provider.GetSSOSettings(rctx, a.Config(), service)
-	if e2 != nil {
-		return nil, nil, nil, model.NewAppError("AuthorizeOAuthUser.GetSSOSettings", "api.user.get_authorization_code.endpoint.app_error", nil, "", http.StatusNotImplemented).Wrap(e2)
-	}
-
 	b, strErr := b64.StdEncoding.DecodeString(state)
 	if strErr != nil {
 		return nil, nil, nil, model.NewAppError("AuthorizeOAuthUser", "api.user.authorize_oauth_user.invalid_state.app_error", nil, "", http.StatusBadRequest).Wrap(strErr)
@@ -1032,6 +1364,11 @@ func (a *App) AuthorizeOAuthUser(rctx request.CTX, w http.ResponseWriter, r *htt
 
 	stateStr := string(b)
 	stateProps := model.MapFromJSON(strings.NewReader(stateStr))
+
+	sso, e2 := a.getResolvedSSOSettingsForOAuthProps(rctx, service, stateProps)
+	if e2 != nil {
+		return nil, stateProps, nil, model.NewAppError("AuthorizeOAuthUser.GetSSOSettings", "api.user.get_authorization_code.endpoint.app_error", nil, "", http.StatusNotImplemented).Wrap(e2)
+	}
 
 	expectedToken, appErr := a.GetOAuthStateToken(stateProps["token"])
 	if appErr != nil {
@@ -1116,16 +1453,27 @@ func (a *App) AuthorizeOAuthUser(rctx request.CTX, w http.ResponseWriter, r *htt
 	p = url.Values{}
 	p.Set("access_token", ar.AccessToken)
 
+	var idTokenClaims []byte
 	var userFromToken *model.User
 	if ar.IdToken != "" {
-		userFromToken, err = provider.GetUserFromIdToken(rctx, ar.IdToken)
-		if err != nil {
-			return nil, stateProps, nil, model.NewAppError("AuthorizeOAuthUser", "api.user.authorize_oauth_user.token_failed.app_error", nil, "", http.StatusInternalServerError).Wrap(err)
+		if service == model.ServiceOpenFederatedAuth {
+			idTokenClaims, err = a.validateOpenFederatedAuthIDToken(sso, ar.IdToken, stateProps["nonce"])
+			if err != nil {
+				return nil, stateProps, nil, model.NewAppError("AuthorizeOAuthUser", "api.user.authorize_oauth_user.token_failed.app_error", nil, "", http.StatusInternalServerError).Wrap(err)
+			}
+		} else {
+			userFromToken, err = provider.GetUserFromIdToken(rctx, ar.IdToken)
+			if err != nil {
+				return nil, stateProps, nil, model.NewAppError("AuthorizeOAuthUser", "api.user.authorize_oauth_user.token_failed.app_error", nil, "", http.StatusInternalServerError).Wrap(err)
+			}
 		}
 	}
 
 	req, requestErr = http.NewRequest("GET", *sso.UserAPIEndpoint, strings.NewReader(""))
 	if requestErr != nil {
+		if len(idTokenClaims) > 0 {
+			return io.NopCloser(bytes.NewReader(idTokenClaims)), stateProps, nil, nil
+		}
 		return nil, stateProps, nil, model.NewAppError("AuthorizeOAuthUser", "api.user.authorize_oauth_user.service.app_error", map[string]any{"Service": service}, "", http.StatusInternalServerError).Wrap(requestErr)
 	}
 
@@ -1135,6 +1483,10 @@ func (a *App) AuthorizeOAuthUser(rctx request.CTX, w http.ResponseWriter, r *htt
 
 	resp, err = a.HTTPService().MakeClient(true).Do(req)
 	if err != nil {
+		if len(idTokenClaims) > 0 {
+			rctx.Logger().Warn("Error getting OAuth userinfo; using validated id_token claims", mlog.Err(err))
+			return io.NopCloser(bytes.NewReader(idTokenClaims)), stateProps, nil, nil
+		}
 		return nil, stateProps, nil, model.NewAppError("AuthorizeOAuthUser", "api.user.authorize_oauth_user.service.app_error", map[string]any{"Service": service}, "", http.StatusInternalServerError).Wrap(err)
 	} else if resp.StatusCode != http.StatusOK {
 		defer resp.Body.Close()
@@ -1144,6 +1496,10 @@ func (a *App) AuthorizeOAuthUser(rctx request.CTX, w http.ResponseWriter, r *htt
 		bodyString := string(bodyBytes)
 
 		rctx.Logger().Error("Error getting OAuth user", mlog.Int("response", resp.StatusCode), mlog.String("body_string", bodyString))
+		if len(idTokenClaims) > 0 {
+			rctx.Logger().Warn("Using validated id_token claims after userinfo endpoint returned non-OK status", mlog.Int("response", resp.StatusCode))
+			return io.NopCloser(bytes.NewReader(idTokenClaims)), stateProps, nil, nil
+		}
 
 		if service == model.ServiceGitlab && resp.StatusCode == http.StatusForbidden && strings.Contains(bodyString, "Terms of Service") {
 			url, err := url.Parse(*sso.UserAPIEndpoint)
@@ -1155,6 +1511,22 @@ func (a *App) AuthorizeOAuthUser(rctx request.CTX, w http.ResponseWriter, r *htt
 		}
 
 		return nil, stateProps, nil, model.NewAppError("AuthorizeOAuthUser", "api.user.authorize_oauth_user.response.app_error", nil, "response_body="+bodyString, http.StatusInternalServerError)
+	}
+
+	if len(idTokenClaims) > 0 {
+		defer resp.Body.Close()
+		userInfoBytes, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			rctx.Logger().Warn("Error reading OAuth userinfo; using validated id_token claims", mlog.Err(readErr))
+			return io.NopCloser(bytes.NewReader(idTokenClaims)), stateProps, nil, nil
+		}
+		userFromToken, err = provider.GetUserFromJSON(rctx, bytes.NewReader(userInfoBytes), nil, sso)
+		if err != nil {
+			rctx.Logger().Warn("Error parsing OAuth userinfo; using validated id_token claims", mlog.Err(err))
+			return io.NopCloser(bytes.NewReader(idTokenClaims)), stateProps, nil, nil
+		}
+
+		return io.NopCloser(bytes.NewReader(idTokenClaims)), stateProps, userFromToken, nil
 	}
 
 	// Note that resp.Body is not closed here, so it must be closed by the caller

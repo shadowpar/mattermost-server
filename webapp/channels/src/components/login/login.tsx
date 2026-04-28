@@ -88,6 +88,7 @@ const Login = ({onCustomizeHeader}: LoginProps) => {
         EnableSignUpWithOffice365,
         EnableSignUpWithGoogle,
         EnableSignUpWithOpenId,
+        EnableSignUpWithOpenFederatedAuth,
         EnableOpenServer,
         EnableUserCreation,
         LdapLoginFieldName,
@@ -95,6 +96,9 @@ const Login = ({onCustomizeHeader}: LoginProps) => {
         GitLabButtonColor,
         OpenIdButtonText,
         OpenIdButtonColor,
+        OpenFederatedAuthButtonText,
+        OpenFederatedAuthButtonColor,
+        OpenFederatedAuthProviders,
         SamlLoginButtonText,
         EnableCustomBrand,
         CustomBrandText,
@@ -140,15 +144,16 @@ const Login = ({onCustomizeHeader}: LoginProps) => {
     const enableSignUpWithGoogle = EnableSignUpWithGoogle === 'true';
     const enableSignUpWithOffice365 = EnableSignUpWithOffice365 === 'true';
     const enableSignUpWithOpenId = EnableSignUpWithOpenId === 'true';
+    const enableSignUpWithOpenFederatedAuth = EnableSignUpWithOpenFederatedAuth === 'true';
     const isLicensed = IsLicensed === 'true';
     const ldapEnabled = isLicensed && enableLdap;
     const enableSignUpWithSaml = isLicensed && enableSaml;
     const siteName = SiteName ?? '';
 
     const enableBaseLogin = enableSignInWithEmail || enableSignInWithUsername || ldapEnabled;
-    const enableExternalSignup = enableSignUpWithGitLab || enableSignUpWithOffice365 || enableSignUpWithGoogle || enableSignUpWithOpenId || enableSignUpWithSaml;
+    const enableExternalSignup = enableSignUpWithGitLab || enableSignUpWithOffice365 || enableSignUpWithGoogle || enableSignUpWithOpenId || enableSignUpWithOpenFederatedAuth || enableSignUpWithSaml;
     const showSignup = enableOpenServer && (enableExternalSignup || enableSignUpWithEmail || enableLdap);
-    const onlyLdapEnabled = enableLdap && !(enableSaml || enableSignInWithEmail || enableSignInWithUsername || enableSignUpWithEmail || enableSignUpWithGitLab || enableSignUpWithGoogle || enableSignUpWithOffice365 || enableSignUpWithOpenId);
+    const onlyLdapEnabled = enableLdap && !(enableSaml || enableSignInWithEmail || enableSignInWithUsername || enableSignUpWithEmail || enableSignUpWithGitLab || enableSignUpWithGoogle || enableSignUpWithOffice365 || enableSignUpWithOpenId || enableSignUpWithOpenFederatedAuth);
 
     const [desktopLoginLink, setDesktopLoginLink] = useState('');
 
@@ -203,6 +208,34 @@ const Login = ({onCustomizeHeader}: LoginProps) => {
                 style: {color: OpenIdButtonColor, borderColor: OpenIdButtonColor},
                 onClick: handleExternalAuth(url, 'openid'),
             });
+        }
+
+        if (enableSignUpWithOpenFederatedAuth) {
+            const configuredProviders = parseOpenFederatedAuthProviders(OpenFederatedAuthProviders);
+            const providers = configuredProviders.length > 0 ? configuredProviders : [{
+                provider_id: '',
+                display_name: OpenFederatedAuthButtonText,
+                button_color: OpenFederatedAuthButtonColor,
+            }];
+
+            for (const provider of providers) {
+                const providerSearch = new URLSearchParams(search);
+                if (provider.provider_id) {
+                    providerSearch.set('provider', provider.provider_id);
+                }
+                const queryString = providerSearch.toString();
+                const url = `${Client4.getOAuthRoute()}/openfederatedauth/login${queryString ? `?${queryString}` : ''}`;
+                const id = provider.provider_id ? `openfederatedauth-${provider.provider_id}` : 'openfederatedauth';
+                const buttonColor = provider.button_color || OpenFederatedAuthButtonColor;
+                externalLoginOptions.push({
+                    id,
+                    url,
+                    icon: <LoginOpenIDIcon/>,
+                    label: provider.display_name || OpenFederatedAuthButtonText || formatMessage({id: 'login.open_federated_auth', defaultMessage: 'Open Federated Auth'}),
+                    style: {color: buttonColor, borderColor: buttonColor},
+                    onClick: handleExternalAuth(url, id),
+                });
+            }
         }
 
         if (enableSignUpWithSaml) {
@@ -1073,5 +1106,28 @@ const Login = ({onCustomizeHeader}: LoginProps) => {
         </div>
     );
 };
+
+type OpenFederatedAuthProviderConfig = {
+    provider_id: string;
+    display_name: string;
+    button_color: string;
+}
+
+function parseOpenFederatedAuthProviders(rawProviders?: string): OpenFederatedAuthProviderConfig[] {
+    if (!rawProviders) {
+        return [];
+    }
+
+    try {
+        const parsed = JSON.parse(rawProviders);
+        if (!Array.isArray(parsed)) {
+            return [];
+        }
+
+        return parsed.filter((provider) => provider && typeof provider.provider_id === 'string');
+    } catch {
+        return [];
+    }
+}
 
 export default Login;
