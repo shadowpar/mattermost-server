@@ -451,6 +451,12 @@ func GenerateLimitedClientConfig(c *model.Config, telemetryID string, license *m
 		}
 	}
 
+	if *c.OpenFederatedAuthSettings.Enable {
+		props["EnableSignUpWithOpenId"] = "true"
+		props["OpenIdButtonText"] = openFederatedAuthLegacyOpenIDButtonText(c)
+		props["OpenIdButtonColor"] = openFederatedAuthLegacyOpenIDButtonColor(c)
+	}
+
 	for key, value := range c.FeatureFlags.ToMap() {
 		props["FeatureFlag"+key] = value
 	}
@@ -500,6 +506,42 @@ func openFederatedAuthProvidersForClient(c *model.Config) string {
 	}
 
 	return string(data)
+}
+
+func openFederatedAuthLegacyOpenIDButtonText(c *model.Config) string {
+	if provider := defaultOpenFederatedAuthProviderForClient(c); provider != nil {
+		if provider.DisplayName != nil && strings.TrimSpace(*provider.DisplayName) != "" {
+			return *provider.DisplayName
+		}
+		if provider.ButtonText != nil && strings.TrimSpace(*provider.ButtonText) != "" {
+			return *provider.ButtonText
+		}
+	}
+
+	return *c.OpenFederatedAuthSettings.ButtonText
+}
+
+func openFederatedAuthLegacyOpenIDButtonColor(c *model.Config) string {
+	if provider := defaultOpenFederatedAuthProviderForClient(c); provider != nil && provider.ButtonColor != nil && strings.TrimSpace(*provider.ButtonColor) != "" {
+		return *provider.ButtonColor
+	}
+
+	return *c.OpenFederatedAuthSettings.ButtonColor
+}
+
+func defaultOpenFederatedAuthProviderForClient(c *model.Config) *model.OpenFederatedAuthProviderSettings {
+	for _, provider := range c.OpenFederatedAuthSettings.Providers {
+		if provider == nil || provider.ProviderID == nil || strings.TrimSpace(*provider.ProviderID) == "" {
+			continue
+		}
+		if provider.Enable != nil && !*provider.Enable {
+			continue
+		}
+
+		return provider
+	}
+
+	return nil
 }
 
 func getGiphySdkKey(ss model.ServiceSettings) string {

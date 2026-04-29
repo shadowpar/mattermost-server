@@ -600,6 +600,7 @@ func (a *App) newSessionUpdateToken(rctx request.CTX, app *model.OAuthApp, acces
 }
 
 func (a *App) GetOAuthLoginEndpoint(rctx request.CTX, w http.ResponseWriter, r *http.Request, service, action, redirectTo, loginHint string, isMobile bool, desktopToken string, inviteToken string, inviteId string) (string, *model.AppError) {
+	service = a.normalizeOpenFederatedAuthOAuthService(service)
 	stateProps := map[string]string{}
 	stateProps["action"] = action
 
@@ -614,7 +615,7 @@ func (a *App) GetOAuthLoginEndpoint(rctx request.CTX, w http.ResponseWriter, r *
 	}
 
 	if service == model.ServiceOpenFederatedAuth {
-		stateProps["provider"] = r.URL.Query().Get("provider")
+		stateProps["provider"] = a.openFederatedAuthProviderIDOrDefault(r.URL.Query().Get("provider"))
 		stateProps["nonce"] = model.NewId()
 	}
 
@@ -633,6 +634,7 @@ func (a *App) GetOAuthLoginEndpoint(rctx request.CTX, w http.ResponseWriter, r *
 }
 
 func (a *App) GetOAuthSignupEndpoint(rctx request.CTX, w http.ResponseWriter, r *http.Request, service, desktopToken string, inviteToken string, inviteId string) (string, *model.AppError) {
+	service = a.normalizeOpenFederatedAuthOAuthService(service)
 	stateProps := map[string]string{}
 	stateProps["action"] = model.OAuthActionSignup
 
@@ -647,7 +649,7 @@ func (a *App) GetOAuthSignupEndpoint(rctx request.CTX, w http.ResponseWriter, r 
 	}
 
 	if service == model.ServiceOpenFederatedAuth {
-		stateProps["provider"] = r.URL.Query().Get("provider")
+		stateProps["provider"] = a.openFederatedAuthProviderIDOrDefault(r.URL.Query().Get("provider"))
 		stateProps["nonce"] = model.NewId()
 	}
 
@@ -657,6 +659,34 @@ func (a *App) GetOAuthSignupEndpoint(rctx request.CTX, w http.ResponseWriter, r 
 	}
 
 	return authURL, nil
+}
+
+func (a *App) normalizeOpenFederatedAuthOAuthService(service string) string {
+	if service == model.ServiceOpenid && a.Config().OpenFederatedAuthSettings.Enable != nil && *a.Config().OpenFederatedAuthSettings.Enable {
+		return model.ServiceOpenFederatedAuth
+	}
+
+	return service
+}
+
+func (a *App) openFederatedAuthProviderIDOrDefault(providerID string) string {
+	providerID = strings.TrimSpace(providerID)
+	if providerID != "" {
+		return providerID
+	}
+
+	for _, provider := range a.Config().OpenFederatedAuthSettings.Providers {
+		if provider == nil || provider.ProviderID == nil || strings.TrimSpace(*provider.ProviderID) == "" {
+			continue
+		}
+		if provider.Enable != nil && !*provider.Enable {
+			continue
+		}
+
+		return strings.TrimSpace(*provider.ProviderID)
+	}
+
+	return ""
 }
 
 func (a *App) GetAuthorizedAppsForUser(userID string, page, perPage int) ([]*model.OAuthApp, *model.AppError) {
@@ -750,6 +780,7 @@ func (a *App) RevokeAccessToken(rctx request.CTX, token string) *model.AppError 
 func (a *App) CompleteOAuth(rctx request.CTX, service string, body io.ReadCloser, props map[string]string, tokenUser *model.User) (*model.User, *model.AppError) {
 	defer body.Close()
 
+	service = a.normalizeOpenFederatedAuthOAuthService(service)
 	action := props["action"]
 
 	// Extract invite token or ID from props so we can add the user to the team if needed
@@ -771,6 +802,7 @@ func (a *App) CompleteOAuth(rctx request.CTX, service string, body io.ReadCloser
 }
 
 func (a *App) getSSOProvider(service string) (einterfaces.OAuthProvider, *model.AppError) {
+	service = a.normalizeOpenFederatedAuthOAuthService(service)
 	sso := a.Config().GetSSOService(service)
 	if sso == nil || !*sso.Enable {
 		return nil, model.NewAppError("getSSOProvider", "api.user.authorize_oauth_user.unsupported.app_error", nil, "service="+service, http.StatusNotImplemented)
@@ -788,6 +820,7 @@ func (a *App) getSSOProvider(service string) (einterfaces.OAuthProvider, *model.
 }
 
 func (a *App) getSSOSettingsForOAuthProps(service string, props map[string]string) (*model.SSOSettings, error) {
+	service = a.normalizeOpenFederatedAuthOAuthService(service)
 	if service != model.ServiceOpenFederatedAuth {
 		return a.Config().GetSSOService(service), nil
 	}
@@ -812,6 +845,7 @@ func (a *App) getSSOSettingsForOAuthProps(service string, props map[string]strin
 }
 
 func (a *App) getResolvedSSOSettingsForOAuthProps(rctx request.CTX, service string, props map[string]string) (*model.SSOSettings, error) {
+	service = a.normalizeOpenFederatedAuthOAuthService(service)
 	settings, err := a.getSSOSettingsForOAuthProps(service, props)
 	if err != nil || service != model.ServiceOpenFederatedAuth {
 		return settings, err
@@ -1284,6 +1318,7 @@ func (a *App) GetOAuthStateToken(token string) (*model.Token, *model.AppError) {
 }
 
 func (a *App) GetAuthorizationCode(rctx request.CTX, w http.ResponseWriter, r *http.Request, service string, props map[string]string, loginHint string) (string, *model.AppError) {
+	service = a.normalizeOpenFederatedAuthOAuthService(service)
 	_, e := a.getSSOProvider(service)
 	if e != nil {
 		return "", e
@@ -1352,6 +1387,7 @@ func (a *App) GetAuthorizationCode(rctx request.CTX, w http.ResponseWriter, r *h
 }
 
 func (a *App) AuthorizeOAuthUser(rctx request.CTX, w http.ResponseWriter, r *http.Request, service, code, state, redirectURI string) (io.ReadCloser, map[string]string, *model.User, *model.AppError) {
+	service = a.normalizeOpenFederatedAuthOAuthService(service)
 	provider, e := a.getSSOProvider(service)
 	if e != nil {
 		return nil, nil, nil, e

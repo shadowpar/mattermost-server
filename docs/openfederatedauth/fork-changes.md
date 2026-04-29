@@ -87,6 +87,42 @@ This value is generated server-side from enabled providers. The UI renders one b
 
 The provider ID is never sent to the OIDC provider as a callback parameter. It is carried inside Mattermost's OAuth state.
 
+## Stock Mobile Compatibility
+
+The stock Mattermost mobile apps do not know about this fork's `openfederatedauth` service name. They do know how to show and start Mattermost's legacy OpenID Connect login option.
+
+To keep stock mobile clients usable, the server publishes legacy OpenID client-config values when `OpenFederatedAuthSettings.Enable` is true:
+
+```text
+EnableSignUpWithOpenId = true
+OpenIdButtonText       = first enabled OpenFederatedAuth provider display name
+OpenIdButtonColor      = first enabled OpenFederatedAuth provider button color
+```
+
+This does not require the commercial OpenID license feature and does not enable Mattermost's stock `OpenIdSettings` provider. It is a compatibility alias for clients that only understand the old OpenID button.
+
+When a stock client follows one of the legacy OpenID routes:
+
+```text
+/oauth/openid/login
+/oauth/openid/mobile_login
+/oauth/openid/signup
+```
+
+the server normalizes the service to:
+
+```text
+openfederatedauth
+```
+
+and selects the first enabled configured provider when no explicit `provider` query parameter is present. The resulting OIDC authorization request still uses the OpenFederatedAuth callback:
+
+```text
+<site-url>/signup/openfederatedauth/complete
+```
+
+This is why stock mobile shows an OpenID-compatible button, such as `CILogon`, while the actual login flow uses this fork's OpenFederatedAuth implementation.
+
 ## OAuth/OIDC Flow Changes
 
 The fork reuses Mattermost's existing OAuth route structure:

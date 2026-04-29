@@ -24,6 +24,28 @@ https://mattermost.example.org/signup/openfederatedauth/complete
 
 The `provider` value is not included in the callback URL. Mattermost stores it in the OAuth/OIDC `state` value and recovers it when the provider redirects back.
 
+## Stock Mobile App Compatibility
+
+Stock Mattermost mobile apps do not know about the `openfederatedauth` service name. For compatibility, this fork exposes the first enabled OpenFederatedAuth provider through Mattermost's legacy OpenID client-config fields.
+
+When `OpenFederatedAuthSettings.Enable` is true:
+
+```text
+EnableSignUpWithOpenId = true
+```
+
+The legacy OpenID button label and color come from the first enabled provider in `OpenFederatedAuthSettings.Providers`. `DisplayName` is preferred for the label, with `ButtonText` as the fallback. If no enabled provider is configured, the root `ButtonText` and `ButtonColor` are used.
+
+The stock mobile app will therefore show an OpenID-style button, for example `CILogon`, even when `OpenIdSettings.Enable` is false and no commercial OpenID license is installed. Clicking that button starts:
+
+```text
+/oauth/openid/mobile_login
+```
+
+The server treats that route as an alias for OpenFederatedAuth and redirects to the first enabled provider. With the example below, that default provider is `cilogon` because it is listed first.
+
+Operators who want a different default provider for stock mobile clients should reorder `OpenFederatedAuthSettings.Providers` so the desired enabled provider appears first.
+
 ## Minimal Configuration
 
 This example uses discovery for both providers. Secrets are omitted here.

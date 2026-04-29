@@ -4,6 +4,7 @@
 package app
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -1643,6 +1644,55 @@ func TestAuthorizeOAuthUser_InvalidToken(t *testing.T) {
 		assert.Equal(t, http.StatusBadRequest, appErr.StatusCode)
 		assert.Equal(t, "api.user.authorize_oauth_user.invalid_state.app_error", appErr.Id)
 	})
+}
+
+func TestOpenIDOAuthRouteAliasesToDefaultOpenFederatedAuthProvider(t *testing.T) {
+	mainHelper.Parallel(t)
+	th := Setup(t)
+
+	einterfaces.RegisterOAuthProvider(model.ServiceOpenFederatedAuth, &mocks.OAuthProvider{})
+
+	th.App.UpdateConfig(func(cfg *model.Config) {
+		cfg.OpenFederatedAuthSettings.Enable = model.NewPointer(true)
+		cfg.OpenFederatedAuthSettings.Providers = []*model.OpenFederatedAuthProviderSettings{
+			{
+				ProviderID: model.NewPointer("default"),
+				SSOSettings: model.SSOSettings{
+					Enable:          model.NewPointer(true),
+					Id:              model.NewPointer("client-id"),
+					Secret:          model.NewPointer("secret"),
+					Scope:           model.NewPointer(OpenIDScope),
+					AuthEndpoint:    model.NewPointer("https://idp.example.com/authorize"),
+					TokenEndpoint:   model.NewPointer("https://idp.example.com/token"),
+					UserAPIEndpoint: model.NewPointer("https://idp.example.com/userinfo"),
+				},
+			},
+		}
+	})
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodGet, "http://mattermost.example.com/oauth/openid/mobile_login", nil)
+
+	authURL, appErr := th.App.GetOAuthLoginEndpoint(th.Context, w, r, model.ServiceOpenid, model.OAuthActionMobile, "mmauth://callback", "", true, "", "", "")
+	require.Nil(t, appErr)
+
+	parsedURL, err := url.Parse(authURL)
+	require.NoError(t, err)
+
+	assert.Equal(t, "https", parsedURL.Scheme)
+	assert.Equal(t, "idp.example.com", parsedURL.Host)
+	assert.Equal(t, "/authorize", parsedURL.Path)
+	assert.Equal(t, "client-id", parsedURL.Query().Get("client_id"))
+	assert.Equal(t, "http://mattermost.example.com/signup/openfederatedauth/complete", parsedURL.Query().Get("redirect_uri"))
+	assert.NotEmpty(t, parsedURL.Query().Get("nonce"))
+
+	state, err := base64.StdEncoding.DecodeString(parsedURL.Query().Get("state"))
+	require.NoError(t, err)
+	stateProps := model.MapFromJSON(bytes.NewReader(state))
+
+	assert.Equal(t, model.OAuthActionMobile, stateProps["action"])
+	assert.Equal(t, "default", stateProps["provider"])
+	assert.NotEmpty(t, stateProps["nonce"])
 }
 
 // TestLoginByIntune_InterfaceNotAvailable tests that LoginByIntune returns proper error when enterprise not compiled

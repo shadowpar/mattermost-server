@@ -50,6 +50,37 @@ func TestGetClientConfig(t *testing.T) {
 			},
 		},
 		{
+			"unlicensed OpenFederatedAuth exposes legacy OpenID mobile button",
+			&model.Config{
+				OpenFederatedAuthSettings: model.OpenFederatedAuthSettings{
+					SSOSettings: model.SSOSettings{
+						Enable:      model.NewPointer(true),
+						ButtonText:  model.NewPointer("Open Federated Auth"),
+						ButtonColor: model.NewPointer("#145DBF"),
+					},
+					Providers: []*model.OpenFederatedAuthProviderSettings{
+						{
+							ProviderID:  model.NewPointer("default"),
+							DisplayName: model.NewPointer("Default Provider"),
+							SSOSettings: model.SSOSettings{
+								Enable:      model.NewPointer(true),
+								ButtonColor: model.NewPointer("#123456"),
+							},
+						},
+					},
+				},
+			},
+			"",
+			nil,
+			map[string]string{
+				"EnableSignUpWithOpenFederatedAuth": "true",
+				"OpenFederatedAuthProviders":        `[{"provider_id":"default","display_name":"Default Provider","button_color":"#123456"}]`,
+				"EnableSignUpWithOpenId":            "true",
+				"OpenIdButtonText":                  "Default Provider",
+				"OpenIdButtonColor":                 "#123456",
+			},
+		},
+		{
 			"licensed, but not for theme management",
 			&model.Config{
 				EmailSettings: model.EmailSettings{

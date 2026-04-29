@@ -303,6 +303,9 @@ func completeOAuth(c *Context, w http.ResponseWriter, r *http.Request) {
 	}
 
 	service := c.Params.Service
+	if service == model.ServiceOpenid && c.App.Config().OpenFederatedAuthSettings.Enable != nil && *c.App.Config().OpenFederatedAuthSettings.Enable {
+		service = model.ServiceOpenFederatedAuth
+	}
 
 	auditRec := c.MakeAuditRecord(model.AuditEventCompleteOAuth, model.AuditStatusFail)
 	defer c.LogAuditRec(auditRec)
